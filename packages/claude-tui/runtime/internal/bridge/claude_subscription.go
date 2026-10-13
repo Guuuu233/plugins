@@ -1920,6 +1920,10 @@ func (r *subscriptionRun) emit(ev Event) {
 	if ch != nil {
 		switch ev.Kind {
 		case KToolStart:
+			if r.interactive && os.Getenv("MAGPIE_CLAUDE_TUI_DEBUG_API") == "1" {
+				sum := sha256.Sum256([]byte(ev.ID))
+				log.Printf("Claude interactive MCP outbound tool=%q id_sha=%x", ev.Name, sum[:6])
+			}
 			r.shown = append(r.shown, shownCall{id: ev.ID, name: ev.Name})
 		case KToolArgs:
 			if n := len(r.shown); n > 0 {

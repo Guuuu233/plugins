@@ -1404,15 +1404,26 @@ func (r *subscriptionRun) readInteractiveOneTurn(rd io.Reader) {
 		time.AfterFunc(time.Second, func() {
 			pmu.Lock()
 			defer pmu.Unlock()
-			if finished || toolStopped || shownIDs[id] {
+			if finished || shownIDs[id] {
 				return
 			}
 			r.mu.Lock()
+			continued := r.resuming && r.segment != nil
 			ready := !r.closed && r.segment != nil && r.tools[name] &&
 				name != interactiveImageTool && name != r.searchName
 			r.mu.Unlock()
+			// The previous native tool turn stays marked stopped until its
+			// next transcript assistant row. If Claude enters MCP before
+			// writing that row, the newly attached continuation is proof
+			// this callback belongs to the next tool turn, not a duplicate.
+			if toolStopped && !continued {
+				return
+			}
 			if !ready {
 				return
+			}
+			if toolStopped {
+				toolStopped = false
 			}
 			if !started {
 				started = true

@@ -184,3 +184,79 @@ toolShown:
 	}
 	run.abort()
 }
+
+// A previous completed client tool leaves toolStopped true until the
+// next native transcript row. That row may never appear while Claude
+// is already blocked in MCP, so the next callback must clear the marker
+// when a new continuation has attached to the same run.
+func TestInteractiveSequentialCallbackWithoutNextTranscript(t *testing.T) {
+	rd, wr := io.Pipe()
+	defer rd.Close()
+	defer wr.Close()
+	run := &subscriptionRun{interactive: true, model: "claude-opus-5-5", tools: map[string]bool{"Read": true, "Edit": true}, pending: map[string]chan mcpToolResult{}}
+	first := run.attach()
+	done := make(chan struct{})
+	go func() { run.readInteractiveOneTurn(rd); close(done) }()
+	_, err := io.WriteString(wr, `{"type":"assistant","uuid":"native-first","message":{"id":"native-first-msg","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"first","name":"mcp__magpie__Read","input":{}}]}}`+"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	drain := func(events <-chan Event) []Event {
+		t.Helper()
+		var got []Event
+		until := time.NewTimer(4 * time.Second)
+		defer until.Stop()
+		for {
+			select {
+			case ev, ok := <-events:
+				if !ok {
+					return got
+				}
+				got = append(got, ev)
+			case <-until.C:
+				t.Fatal("tool handoff never completed")
+			}
+		}
+	}
+	a := drain(first)
+	if len(a) < 2 {
+		t.Fatalf("first tool was not sent: %+v", a)
+	}
+	run.mu.Lock()
+	run.resuming = true
+	run.mu.Unlock()
+	second := run.attach()
+	until := time.Now().Add(time.Second)
+	var callback func(string, string, json.RawMessage)
+	for time.Now().Before(until) {
+		run.mu.Lock()
+		callback = run.onCall
+		run.mu.Unlock()
+		if callback != nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if callback == nil {
+		t.Fatal("no callback registered")
+	}
+	// The second tool has no native JSONL row yet; in the failed real
+	// session it never received one because the MCP result had not returned.
+	callback("second", "Edit", json.RawMessage(`{"file_path":"x","old_string":"a","new_string":"b"}`))
+	b := drain(second)
+	var n int
+	for _, ev := range b {
+		if ev.Kind == KToolStart && ev.ID == "second" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("second native callback was suppressed: %d, events=%+v", n, b)
+	}
+	_ = wr.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reader leaked")
+	}
+}
