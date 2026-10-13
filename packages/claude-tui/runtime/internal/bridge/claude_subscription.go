@@ -1500,7 +1500,7 @@ func (r *subscriptionRun) letGo() {
 	// it. Keep the same MCP run for its result; restarting it would orphan
 	// that result and risk replaying a side-effecting tool.
 	r.mu.Lock()
-	waitingForClientTool := r.interactive && !r.closed && len(r.pending) > 0 && len(r.shown) > 0
+	waitingForClientTool := r.interactive && !r.closed && len(r.shown) > 0
 	r.mu.Unlock()
 	if waitingForClientTool {
 		r.endSegment()
@@ -3314,6 +3314,7 @@ func (rt *runtimeTUI) serveMessagesInner(w http.ResponseWriter, r *http.Request,
 			// PTY run owns this handoff. A stale historical tool result followed
 			// by a newer user turn is handled below as abandoned-turn recovery.
 			if err := validateInteractiveMatchedContinuation(req, run, results, how); err != nil {
+				log.Printf("Claude interactive matched tool continuation rejected: %v", err)
 				return writeError(w, from, http.StatusConflict, err.Error()), err.Error()
 			}
 			run.mu.Lock()
@@ -3321,6 +3322,7 @@ func (rt *runtimeTUI) serveMessagesInner(w http.ResponseWriter, r *http.Request,
 			run.mu.Unlock()
 			if !sameContext {
 				msg := "Claude interactive migration: settings or tool schema changed while a PTY tool was running"
+				log.Print(msg)
 				return writeError(w, from, http.StatusConflict, msg), msg
 			}
 		}
@@ -3371,6 +3373,7 @@ func (rt *runtimeTUI) serveMessagesInner(w http.ResponseWriter, r *http.Request,
 				userContextNonce, err = run.prepareInteractiveUserContext(userText, results)
 			}
 			if err != nil {
+				log.Printf("Claude interactive matched tool handoff rejected: %v", err)
 				run.abort()
 				msg := err.Error()
 				return writeError(w, from, http.StatusConflict, msg), msg
