@@ -14,7 +14,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -55,7 +55,7 @@ import {
 } from "./hook-install.ts";
 import { makePrintErrorResult } from "./print-result.ts";
 import { runJsonSchemaStopHook, runRuntimeHook } from "./stop-hook.ts";
-import { buildClaudeLaunchCommand, interactiveMcpBackgroundEnvArgs } from "./launch-command.ts";
+import { buildClaudeLaunchCommand } from "./launch-command.ts";
 import {
   apiErrorStatusFromRow,
   makeClaudeErrorResultEvent,
@@ -171,6 +171,11 @@ if (resumedSessionId && !forkedSession) {
 const runId = new Date().toISOString().replace(/[:.]/g, "-") + "-" + randomUUID().slice(0, 8);
 const runDir = join(resolveRunRoot(targetCwd), runId);
 mkdirSync(runDir, { recursive: true });
+// Opt-in local-only API diagnostics for stuck post-tool model requests.
+// Claude debug files can include private request metadata; protect the
+// directory rather than printing diagnostics to Magpie or Desktop logs.
+const traceAPI = process.env.MAGPIE_CLAUDE_TUI_DEBUG_API === "1";
+if (traceAPI) chmodSync(runDir, 0o700);
 
 const jsonSchemaPath = jsonSchema ? join(runDir, "json-schema.json") : undefined;
 const claudeExitStatusPath = join(runDir, "claude-exit-status");
@@ -646,11 +651,13 @@ function startTmux(): void {
   // synthesize print/json output itself.
   const claudeArgs = [
     ...(bypassPermissions ? ["--dangerously-skip-permissions"] : []),
+    ...(traceAPI ? ["--debug", "api", "--debug-file", join(runDir, "claude-api.log")] : []),
     ...forwardedClaudeArgs,
   ];
   const envArgs = [
+    // Keep MCP calls in the foreground until the client handoff completes.
+    "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=0",
     ...claudeAuthEnvArgs(process.env, { localAuth: hasDesplegaFlag("local-auth") }),
-    ...interactiveMcpBackgroundEnvArgs(),
     "CLAUDE_BRIDGE_RUNTIME_HOOK=1",
     `CLAUDE_BRIDGE_RUN_DIR=${runDir}`,
     ...(userContextPath ? [`CLAUDE_BRIDGE_USER_CONTEXT_PATH=${userContextPath}`] : []),

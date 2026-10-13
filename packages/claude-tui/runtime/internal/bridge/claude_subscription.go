@@ -3285,6 +3285,34 @@ func (rt *runtimeTUI) serveMessagesInner(w http.ResponseWriter, r *http.Request,
 	if recoveryIdx < 0 {
 		recoveryIdx = recoveryCurrent
 	}
+	// An explicit read-only recovery may arrive while the abandoned PTY is
+	// still alive and owns this conversation. Serialize against new turns
+	// before reaping it. Never displace a live client tool callback: it may
+	// still have side effects in the caller's environment.
+	recoveryClaimed := false
+	if run == nil && optInCurrent >= 0 && outerSession != "" {
+		saved, ok := rt.bridge.interactiveSession(owner, outerSession)
+		if ok && saved.Dirty && (saved.Model == "" || saved.Model == model) {
+			if !rt.bridge.claimInteractiveOuterTurn(owner, outerSession) {
+				msg := "Claude interactive recovery already in flight"
+				return writeError(w, from, http.StatusConflict, msg), msg
+			}
+			recoveryClaimed = true
+			defer rt.bridge.releaseInteractiveOuterTurn(owner, outerSession)
+			if old := rt.bridge.interactiveOuterOwner(owner, outerSession); old != nil {
+				old.mu.Lock()
+				parked := old.interactive && !old.closed && old.owner == owner && old.model == model &&
+					!old.parkedAt.IsZero() && len(old.pending) == 0 && len(old.early) == 0 && len(old.late) == 0
+				old.mu.Unlock()
+				if !parked {
+					msg := "Claude interactive recovery refused: original tool callbacks are still active"
+					return writeError(w, from, http.StatusConflict, msg), msg
+				}
+				log.Print("Claude interactive explicit read-only recovery replacing an abandoned parked PTY")
+				old.abort()
+			}
+		}
+	}
 	if recoveryIdx >= 0 && run == nil && outerSession != "" {
 		saved, savedOK := rt.bridge.interactiveSession(owner, outerSession)
 		if savedOK && saved.Dirty && (saved.Model == "" || saved.Model == model) {
@@ -3446,7 +3474,7 @@ func (rt *runtimeTUI) serveMessagesInner(w http.ResponseWriter, r *http.Request,
 		// outerSession "" — is decided inside start(), so the live-outer
 		// check happens there too; a live canonical run refuses a second
 		// canonical start with errInteractiveOuterLive → 409 below.
-		if outerSession != "" {
+		if outerSession != "" && !recoveryClaimed {
 			if !rt.bridge.claimInteractiveOuterTurn(owner, outerSession) {
 				msg := "Claude interactive turn already in flight for this conversation"
 				return writeError(w, from, http.StatusConflict, msg), msg
