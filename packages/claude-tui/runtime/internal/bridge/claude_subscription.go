@@ -1912,10 +1912,13 @@ func (r *subscriptionRun) emit(ev Event) {
 	defer r.sending.Unlock()
 	r.mu.Lock()
 	ch := r.segment
+	if ev.Kind == KStart {
+		// No client may reattach to an old tool result after the model has
+		// started replying while the disconnected stream was absent.
+		r.shown = nil
+	}
 	if ch != nil {
 		switch ev.Kind {
-		case KStart: // a reply begins
-			r.shown = nil
 		case KToolStart:
 			r.shown = append(r.shown, shownCall{id: ev.ID, name: ev.Name})
 		case KToolArgs:
@@ -3366,7 +3369,16 @@ func (rt *runtimeTUI) serveMessagesInner(w http.ResponseWriter, r *http.Request,
 	var events <-chan Event
 	if run != nil {
 		var userContextNonce string
-		if run.interactive {
+		if interactiveAlreadyDeliveredHandoff(run, req, results) {
+			// The prior client connection died after MCP results were accepted.
+			// Reattach to the pending Claude reply; never resend those results.
+			run.mu.Lock()
+			run.parkedAt = time.Time{}
+			run.mu.Unlock()
+			run.timer.Reset(30 * time.Minute)
+			events = run.attach()
+			log.Printf("Claude interactive reattached to already-delivered MCP results after client disconnect")
+		} else if run.interactive {
 			var userText string
 			results, userText, err = interactiveToolHandoff(req, results, interactiveHeardPrefixEnd(run, req.Messages))
 			if err == nil {
@@ -3387,7 +3399,7 @@ func (rt *runtimeTUI) serveMessagesInner(w http.ResponseWriter, r *http.Request,
 				return writeError(w, from, http.StatusConflict, msg), msg
 			}
 		}
-		if err == nil {
+		if err == nil && events == nil {
 			events, err = run.continueWith(results, more)
 		}
 		if err == nil && userContextNonce != "" {

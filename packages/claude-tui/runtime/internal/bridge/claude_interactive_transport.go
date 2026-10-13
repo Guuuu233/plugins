@@ -337,12 +337,49 @@ func validateInteractiveExactIDContinuation(req *Request, run *subscriptionRun, 
 	return nil
 }
 
+// interactiveAlreadyDeliveredHandoff recognizes a client retry of the exact
+// tool results this live Claude process has already received. The old HTTP
+// stream vanished, but its reply has not: reattach instead of sending MCP
+// results twice or starting another Claude process.
+func interactiveAlreadyDeliveredHandoff(run *subscriptionRun, req *Request, results []Part) bool {
+	if run == nil || len(results) == 0 {
+		return false
+	}
+	start := len(req.Messages)
+	for start > 0 && req.Messages[start-1].Role != "assistant" {
+		start--
+	}
+	lastResult := -1
+	for i := start; i < len(req.Messages); i++ {
+		for _, p := range req.Messages[i].Parts {
+			if p.Kind == ToolResult {
+				lastResult = i
+			}
+		}
+	}
+	heardEnd := interactiveHeardPrefixEnd(run, req.Messages)
+	if lastResult < start || heardEnd <= lastResult {
+		return false
+	}
+	// Only generated system notices can be new. Another user instruction
+	// must not be silently swallowed as a repeated tool result.
+	for _, m := range req.Messages[heardEnd:] {
+		if m.Role != "system" || len(m.Parts) != 1 || m.Parts[0].Kind != Text ||
+			!tokenBudgetSystemNotice.MatchString(strings.TrimSpace(m.Parts[0].Text)) {
+			return false
+		}
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	return run.interactive && !run.closed && len(run.pending) == 0 && len(run.early) == 0 && !run.parkedAt.IsZero()
+}
+
 func interactiveHeardPrefixEnd(run *subscriptionRun, msgs []Message) int {
 	if run == nil {
 		return -1
 	}
 	run.mu.Lock()
-	told := run.told
+	told, stable := run.told, run.toldWithoutBudgetNotices
 	run.mu.Unlock()
 	if told == "" {
 		return -1
@@ -352,6 +389,27 @@ func interactiveHeardPrefixEnd(run *subscriptionRun, msgs []Message) int {
 	hashMessages(h, msgs, func(i int) {
 		if hex.EncodeToString(h.Sum(nil)) == told {
 			end = i + 1
+		}
+	})
+	if end >= 0 || stable == "" {
+		return end
+	}
+	// Desktop regenerates system-only token counters during a long tool.
+	// Align only that recognized, generated notice; retain original indices.
+	filtered := make([]Message, 0, len(msgs))
+	positions := make([]int, 0, len(msgs))
+	for i, m := range msgs {
+		if m.Role == "system" && len(m.Parts) == 1 && m.Parts[0].Kind == Text &&
+			tokenBudgetSystemNotice.MatchString(strings.TrimSpace(m.Parts[0].Text)) {
+			continue
+		}
+		filtered = append(filtered, m)
+		positions = append(positions, i+1)
+	}
+	h = sha256.New()
+	hashMessages(h, filtered, func(i int) {
+		if hex.EncodeToString(h.Sum(nil)) == stable {
+			end = positions[i]
 		}
 	})
 	return end
@@ -1550,9 +1608,9 @@ func interactiveClaudeEnv(env []string) []string {
 	kept := clean[:0]
 	for _, entry := range clean {
 		key, _, _ := strings.Cut(entry, "=")
-		if key != "DISABLE_AUTO_COMPACT" && key != "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS" {
+		if key != "DISABLE_AUTO_COMPACT" {
 			kept = append(kept, entry)
 		}
 	}
-	return append(kept, "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=0")
+	return kept
 }
