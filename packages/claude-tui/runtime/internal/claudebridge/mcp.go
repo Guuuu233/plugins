@@ -146,9 +146,21 @@ func RunMCP(args []string) error {
 					id = newCallID()
 				}
 				payload, _ := json.Marshal(callbackRequest{ToolCallID: id, Name: p.Name, Arguments: p.Arguments})
+				trace := os.Getenv("MAGPIE_CLAUDE_TUI_DEBUG_API") == "1"
+				start := time.Now()
+				if trace {
+					fmt.Fprintf(os.Stderr, "magpie-mcp-helper phase=callback-start tool=%q\n", p.Name)
+				}
 				httpReq, _ := http.NewRequest(http.MethodPost, callbackURL, bytes.NewReader(payload))
 				httpReq.Header.Set("Content-Type", "application/json")
 				res, err := client.Do(httpReq)
+				if trace {
+					status := 0
+					if res != nil {
+						status = res.StatusCode
+					}
+					fmt.Fprintf(os.Stderr, "magpie-mcp-helper phase=callback-end tool=%q status=%d elapsed_ms=%d\n", p.Name, status, time.Since(start).Milliseconds())
+				}
 				if err != nil {
 					rpcErr = map[string]any{"code": -32000, "message": err.Error()}
 					break

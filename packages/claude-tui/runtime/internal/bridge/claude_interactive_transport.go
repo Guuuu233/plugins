@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1368,6 +1369,11 @@ func (r *subscriptionRun) readInteractiveOneTurn(rd io.Reader) {
 	var pmu sync.Mutex
 	var quiet *time.Timer
 	pendingToolMessage := ""
+	// Native Claude may dispatch an MCP callback before its tool_use is
+	// written to the transcript (and sometimes never writes that row until
+	// the MCP result returns). Both sources must share this ID ledger.
+	shownIDs := map[string]bool{}
+	const callbackMessage = "__mcp_callback_pending__"
 	settleToolTurn := func() { // pmu held
 		if quiet != nil {
 			quiet.Stop()
@@ -1384,12 +1390,65 @@ func (r *subscriptionRun) readInteractiveOneTurn(rd io.Reader) {
 		seenUsage = map[string]Usage{}
 		lastUsage = Usage{}
 	}
+	// The MCP HTTP callback is an independent source of a proven native
+	// tool ID, name and arguments. Give the transcript a short head start to
+	// preserve its thinking/text ordering; if it remains silent, synthesize
+	// the otherwise missing tool_use. The caller can then execute the tool
+	// and release Claude's own blocked MCP request.
+	r.mu.Lock()
+	r.onCall = func(id, name string, args json.RawMessage) {
+		if id == "" || name == "" {
+			return
+		}
+		copied := bytes.Clone(args)
+		time.AfterFunc(time.Second, func() {
+			pmu.Lock()
+			defer pmu.Unlock()
+			if finished || toolStopped || shownIDs[id] {
+				return
+			}
+			r.mu.Lock()
+			ready := !r.closed && r.segment != nil && r.tools[name] &&
+				name != interactiveImageTool && name != r.searchName
+			r.mu.Unlock()
+			if !ready {
+				return
+			}
+			if !started {
+				started = true
+				r.emit(Event{Kind: KStart, Model: r.model})
+			}
+			shownIDs[id] = true
+			r.mu.Lock()
+			r.asked = append(r.asked, name)
+			r.mu.Unlock()
+			r.emit(Event{Kind: KToolStart, ID: id, Name: name})
+			if len(copied) != 0 {
+				r.emit(Event{Kind: KToolArgs, Text: string(copied)})
+			}
+			log.Printf("Claude interactive MCP callback delivered without transcript tool row (tool=%s)", name)
+			pendingToolMessage = callbackMessage
+			if quiet != nil {
+				quiet.Stop()
+			}
+			quiet = time.AfterFunc(unstreamedQuiet, func() {
+				pmu.Lock()
+				defer pmu.Unlock()
+				settleToolTurn()
+			})
+		})
+	}
+	r.mu.Unlock()
 	defer func() {
 		pmu.Lock()
+		finished = true
 		if quiet != nil {
 			quiet.Stop()
 		}
 		pmu.Unlock()
+		r.mu.Lock()
+		r.onCall = nil
+		r.mu.Unlock()
 	}()
 	for scanner.Scan() {
 		pmu.Lock()
@@ -1428,7 +1487,13 @@ func (r *subscriptionRun) readInteractiveOneTurn(rd io.Reader) {
 		// pending tool turn have arrived. Usually the quiet timer settles it
 		// first; this is the deterministic boundary when another row follows.
 		if pendingToolMessage != "" && (msg.Type != "assistant" || msg.Message.ID != pendingToolMessage) {
-			settleToolTurn()
+			// A callback-first tool may have no transcript row yet. Its first
+			// assistant row is part of the same tool turn, not a new reply.
+			if pendingToolMessage != callbackMessage || msg.Type != "assistant" {
+				settleToolTurn()
+			} else {
+				pendingToolMessage = msg.Message.ID
+			}
 		}
 		if msg.SessionID != "" {
 			r.mu.Lock()
@@ -1441,6 +1506,23 @@ func (r *subscriptionRun) readInteractiveOneTurn(rd io.Reader) {
 				config.NoteLimits(user, claudeLimits(msg.RateLimitInfo))
 			}
 		case "assistant":
+			// A transcript row may be appended only after an MCP callback has
+			// already delivered and settled its tool turn. Do not start a
+			// second assistant message: KStart would erase the still-shown
+			// call IDs, orphaning the Desktop's pending result.
+			if toolStopped && !started && len(msg.Message.Content) > 0 {
+				duplicate := true
+				for _, block := range msg.Message.Content {
+					if block.Type != "tool_use" || !shownIDs[block.ID] {
+						duplicate = false
+						break
+					}
+				}
+				if duplicate {
+					pmu.Unlock()
+					continue
+				}
+			}
 			if toolStopped {
 				r.mu.Lock()
 				continued := r.resuming && r.segment != nil
@@ -1500,6 +1582,12 @@ func (r *subscriptionRun) readInteractiveOneTurn(rd io.Reader) {
 						r.emit(Event{Kind: KThink, Text: block.Thinking})
 					}
 				case "tool_use":
+					// A native MCP callback may already have shown exactly
+					// this ID. Neither re-execute it nor raise a repeated
+					// tool error when its delayed transcript row arrives.
+					if shownIDs[block.ID] {
+						continue
+					}
 					r.mu.Lock()
 					readOnly := r.readOnlyRecovery
 					r.mu.Unlock()
@@ -1530,6 +1618,7 @@ func (r *subscriptionRun) readInteractiveOneTurn(rd io.Reader) {
 						continue
 					}
 					calledTools = true
+					shownIDs[block.ID] = true
 					r.mu.Lock()
 					r.asked = append(r.asked, name)
 					r.mu.Unlock()

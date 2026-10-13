@@ -2825,6 +2825,10 @@ func (r *subscriptionRun) continueWith(results []Part, tools []bridgeTool) (<-ch
 			continue
 		}
 		delivered++
+		if r.interactive && os.Getenv("MAGPIE_CLAUDE_TUI_DEBUG_API") == "1" {
+			sum := sha256.Sum256([]byte(p.CallID))
+			log.Printf("Claude interactive MCP tool result delivered: id_sha=%x", sum[:6])
+		}
 		r.bridge.mu.Lock()
 		delete(r.bridge.calls, p.CallID)
 		r.bridge.mu.Unlock()
@@ -2986,11 +2990,18 @@ func (b *subscriptionBridge) mcpCall(w http.ResponseWriter, r *http.Request) {
 	}
 	run.pending[call.ToolCallID] = waiter
 	run.mu.Unlock()
+	if run.interactive && os.Getenv("MAGPIE_CLAUDE_TUI_DEBUG_API") == "1" {
+		sum := sha256.Sum256([]byte(call.ToolCallID))
+		log.Printf("Claude interactive MCP callback registered: tool=%q id_sha=%x", call.Name, sum[:6])
+	}
 	b.mu.Lock()
 	b.calls[call.ToolCallID] = run
 	b.mu.Unlock()
-	if run.onCall != nil {
-		run.onCall(call.ToolCallID, call.Name, call.Arguments)
+	run.mu.Lock()
+	onCall := run.onCall
+	run.mu.Unlock()
+	if onCall != nil {
+		onCall(call.ToolCallID, call.Name, call.Arguments)
 	}
 	var expire <-chan time.Time
 	if run.patience > 0 {
