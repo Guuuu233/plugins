@@ -1,0 +1,12 @@
+#!/bin/sh
+# Packaged entry to the vendored claude-bridge-magpie Wrapper.
+# exec's Bun on the vendored cli.ts so `bun` must be on PATH.
+# npm exposes this file as a symlink under node_modules/.bin/, so $0 is
+# unreliable; resolve the real script location through the symlink chain.
+SELF="$0"
+while [ -h "$SELF" ]; do
+  LINK=$(readlink "$SELF")
+  case "$LINK" in /*) SELF="$LINK" ;; *) SELF="$(CDPATH= cd -- "$(dirname -- "$SELF")" && pwd)/$LINK" ;; esac
+done
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$SELF")" && pwd)
+exec bun "$SELF_DIR/../vendor/claude-bridge-magpie/src/cli.ts" "$@"

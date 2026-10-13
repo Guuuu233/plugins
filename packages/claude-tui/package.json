@@ -1,0 +1,52 @@
+{
+  "name": "@magpie-community/opencode-claude-tui-auth",
+  "version": "0.1.0",
+  "description": "Use an existing Claude Code subscription through Claude's interactive TUI in OpenCode and magpie",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": "./index.mjs",
+  "files": [
+    "index.mjs",
+    "src",
+    "runtime",
+    "scripts",
+    "bin",
+    "vendor/claude-bridge-magpie",
+    "README.md",
+    "COMPATIBILITY.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "magpie-tui-check-deps": "./scripts/check-deps.mjs",
+    "magpie-tui-runtime-setup": "./scripts/magpie-tui-runtime-setup.mjs",
+    "magpie-tui-bridge": "./bin/magpie-tui-bridge"
+  },
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "zod": "4.4.3"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "claude",
+    "claude-code",
+    "provider",
+    "magpie"
+  ],
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "arm64",
+    "x64"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/magpie-community/plugins.git",
+    "directory": "packages/claude-tui"
+  }
+}

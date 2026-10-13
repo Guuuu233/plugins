@@ -1,6 +1,8 @@
 {
   "version": 1,
   "plugins": [
+    { "package": "@magpie-community/opencode-claude-tui-auth", "name": "Claude TUI", "icon": "claude-color", "providers": ["claude-tui"], "community": true,
+      "summary": { "en": "Use an existing Claude Code subscription through Claude's interactive TUI, with streaming and tool continuation.", "zh": "通过 Claude 交互式 TUI 使用现有 Claude Code 订阅，支持流式回复和工具续接。" } },
     { "package": "@magpie-community/opencode-zen-free-auth", "name": "OpenCode Zen Free", "icon": "opencode", "providers": ["opencode-zen-free"], "community": true,
       "summary": { "en": "OpenCode Zen's free models with the public credential, automatic discovery and native streaming protocols.", "zh": "使用 public 凭证接入 OpenCode Zen 免费模型，自动发现模型并支持原生流式协议。" } },
     { "package": "@magpie-community/opencode-zcode-auth", "name": "ZCode", "icon": "zcode", "providers": ["zcode"], "community": true, "replaces": "zcode",
