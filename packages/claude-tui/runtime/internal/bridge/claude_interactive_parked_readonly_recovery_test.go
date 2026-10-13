@@ -15,7 +15,7 @@ func TestInteractiveExplicitRecoveryReapsAbandonedParkedOwner(t *testing.T) {
 	rt := &runtimeTUI{bridge: b}
 	owner, outer := "owner", "abandoned-readonly"
 	olSave(t, b, owner, outer, "inner-abandoned", true)
-	old := &subscriptionRun{bridge: b, token: "old-stalled", owner: owner, model: olModel, outerSession: outer, interactive: true, parkedAt: time.Now(), pending: map[string]chan mcpToolResult{}, shown: []shownCall{{id: "write-1", name: "write_file"}}, timer: time.AfterFunc(time.Hour, func() {})}
+	old := &subscriptionRun{bridge: b, token: "old-stalled", owner: owner, model: olModel, outerSession: outer, interactive: true, abandonedByClient: true, parkedAt: time.Now(), pending: map[string]chan mcpToolResult{}, shown: []shownCall{{id: "write-1", name: "write_file"}}, timer: time.AfterFunc(time.Hour, func() {})}
 	defer old.timer.Stop()
 	b.mu.Lock()
 	b.runs[old.token] = old

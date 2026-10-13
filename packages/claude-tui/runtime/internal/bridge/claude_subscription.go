@@ -162,12 +162,15 @@ type subscriptionRun struct {
 	// sending is held across a send to the segment and taken before it is
 	// closed, so a send blocked on a full segment no one reads yet holds
 	// this, not mu: the request's heard, stderr and abort go on meanwhile
-	sending  sync.Mutex
-	segment  chan Event
-	pending  map[string]chan mcpToolResult
-	closed   bool
-	resuming bool // a tool-result request owns this run until its segment ends
-	stderr   strings.Builder
+	sending           sync.Mutex
+	segment           chan Event
+	pending           map[string]chan mcpToolResult
+	queuedCallbacks   []queuedMCPCall // MCP requests received before transcript reader starts
+	seenMCPCallIDs    map[string]bool // reject duplicate callback IDs even after first result
+	closed            bool
+	abandonedByClient bool // only explicit client disconnect authorizes read-only recovery takeover
+	resuming          bool // a tool-result request owns this run until its segment ends
+	stderr            strings.Builder
 	// Only the opted-in PTY wrapper uses a finite stdin prompt and a
 	// transcript-result stream. It is not an SDK stdin run.
 	interactive           bool
@@ -295,6 +298,11 @@ type subscriptionRun struct {
 // was told it: Claude Code's id for it, the tool and its arguments.
 type shownCall struct {
 	id, name, args string
+}
+
+type queuedMCPCall struct {
+	id, name string
+	args     json.RawMessage
 }
 
 // waitTool collects a tool result that took longer than an agent's patience.
@@ -1503,6 +1511,9 @@ func (r *subscriptionRun) letGo() {
 	waitingForClientTool := r.interactive && !r.closed && len(r.shown) > 0
 	r.mu.Unlock()
 	if waitingForClientTool {
+		r.mu.Lock()
+		r.abandonedByClient = true
+		r.mu.Unlock()
 		r.endSegment()
 		r.park()
 		r.timer.Reset(30 * time.Minute)
@@ -2885,6 +2896,31 @@ func callIDs(parts []Part) string {
 	return strings.Join(ids, ", ")
 }
 
+// rejectUnshownInteractiveMCP releases Claude's native MCP call when the
+// client-visible tool segment has already closed. The tool was never
+// offered to the client: returning a structured failure is safer than
+// waiting for a result no client can possibly provide.
+func (r *subscriptionRun) rejectUnshownInteractiveMCP(id string) {
+	r.mu.Lock()
+	waiter := r.pending[id]
+	delete(r.pending, id)
+	r.mu.Unlock()
+	if waiter == nil {
+		return
+	}
+	if r.bridge != nil {
+		r.bridge.mu.Lock()
+		if r.bridge.calls[id] == r {
+			delete(r.bridge.calls, id)
+		}
+		r.bridge.mu.Unlock()
+	}
+	waiter <- mcpToolResult{IsError: true, Content: []map[string]any{{
+		"type": "text", "text": "The tool was NOT executed: its client handoff was no longer available. Do not assume this tool succeeded.",
+	}}}
+	close(waiter)
+}
+
 func (b *subscriptionBridge) mcpCall(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	if token == "" {
@@ -2986,13 +3022,31 @@ func (b *subscriptionBridge) mcpCall(w http.ResponseWriter, r *http.Request) {
 	}
 	waiter := make(chan mcpToolResult, 1)
 	run.mu.Lock()
+	if run.seenMCPCallIDs[call.ToolCallID] {
+		run.mu.Unlock()
+		http.Error(w, "duplicate native MCP callback ID; refusing tool replay", http.StatusConflict)
+		return
+	}
+	if run.seenMCPCallIDs == nil {
+		run.seenMCPCallIDs = map[string]bool{}
+	}
+	run.seenMCPCallIDs[call.ToolCallID] = true
 	if result, ok := run.early[call.ToolCallID]; ok {
 		delete(run.early, call.ToolCallID)
 		run.mu.Unlock()
 		writeJSON(w, 200, result)
 		return
 	}
+	if run.pending == nil {
+		run.pending = map[string]chan mcpToolResult{}
+	}
 	run.pending[call.ToolCallID] = waiter
+	onCall := run.onCall
+	if run.interactive && onCall == nil {
+		run.queuedCallbacks = append(run.queuedCallbacks, queuedMCPCall{
+			id: call.ToolCallID, name: call.Name, args: bytes.Clone(call.Arguments),
+		})
+	}
 	run.mu.Unlock()
 	if run.interactive && os.Getenv("MAGPIE_CLAUDE_TUI_DEBUG_API") == "1" {
 		sum := sha256.Sum256([]byte(call.ToolCallID))
@@ -3001,9 +3055,6 @@ func (b *subscriptionBridge) mcpCall(w http.ResponseWriter, r *http.Request) {
 	b.mu.Lock()
 	b.calls[call.ToolCallID] = run
 	b.mu.Unlock()
-	run.mu.Lock()
-	onCall := run.onCall
-	run.mu.Unlock()
 	if onCall != nil {
 		onCall(call.ToolCallID, call.Name, call.Arguments)
 	}
@@ -3026,6 +3077,28 @@ func (b *subscriptionBridge) mcpCall(w http.ResponseWriter, r *http.Request) {
 		run.mu.Unlock()
 		writeJSON(w, 200, stillRunning(call.ToolCallID, call.Name))
 	case <-r.Context().Done():
+		// The native MCP caller abandoned this ID. It must not remain
+		// executable via a buffered pre-reader callback or a stale timer.
+		run.mu.Lock()
+		unclaimed := run.pending[call.ToolCallID] == waiter
+		if unclaimed {
+			delete(run.pending, call.ToolCallID)
+			for i := 0; i < len(run.queuedCallbacks); {
+				if run.queuedCallbacks[i].id == call.ToolCallID {
+					run.queuedCallbacks = append(run.queuedCallbacks[:i], run.queuedCallbacks[i+1:]...)
+				} else {
+					i++
+				}
+			}
+		}
+		run.mu.Unlock()
+		if unclaimed {
+			b.mu.Lock()
+			if b.calls[call.ToolCallID] == run {
+				delete(b.calls, call.ToolCallID)
+			}
+			b.mu.Unlock()
+		}
 		return
 	}
 }
@@ -3316,8 +3389,9 @@ func (rt *runtimeTUI) serveMessagesInner(w http.ResponseWriter, r *http.Request,
 			defer rt.bridge.releaseInteractiveOuterTurn(owner, outerSession)
 			if old := rt.bridge.interactiveOuterOwner(owner, outerSession); old != nil {
 				old.mu.Lock()
-				parked := old.interactive && !old.closed && old.owner == owner && old.model == model &&
-					!old.parkedAt.IsZero() && len(old.pending) == 0 && len(old.early) == 0 && len(old.late) == 0
+				parked := old.interactive && old.abandonedByClient && !old.closed && !old.resuming && old.segment == nil &&
+					old.owner == owner && old.model == model && !old.parkedAt.IsZero() &&
+					len(old.pending) == 0 && len(old.early) == 0 && len(old.late) == 0
 				old.mu.Unlock()
 				if !parked {
 					msg := "Claude interactive recovery refused: original tool callbacks are still active"

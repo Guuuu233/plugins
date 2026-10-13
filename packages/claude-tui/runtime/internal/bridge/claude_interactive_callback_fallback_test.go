@@ -15,7 +15,7 @@ func TestInteractiveMCPCallbackAndTranscriptOrder(t *testing.T) {
 			rd, wr := io.Pipe()
 			defer rd.Close()
 			defer wr.Close()
-			run := &subscriptionRun{interactive: true, model: "claude-opus-5-5", tools: map[string]bool{"Read": true}, pending: map[string]chan mcpToolResult{}}
+			run := &subscriptionRun{interactive: true, model: "claude-opus-5-5", tools: map[string]bool{"Read": true}, pending: map[string]chan mcpToolResult{"tool_abc": make(chan mcpToolResult, 1)}}
 			ch := run.attach()
 			done := make(chan struct{})
 			go func() { run.readInteractiveOneTurn(rd); close(done) }()
@@ -242,6 +242,9 @@ func TestInteractiveSequentialCallbackWithoutNextTranscript(t *testing.T) {
 	}
 	// The second tool has no native JSONL row yet; in the failed real
 	// session it never received one because the MCP result had not returned.
+	run.mu.Lock()
+	run.pending["second"] = make(chan mcpToolResult, 1)
+	run.mu.Unlock()
 	callback("second", "Edit", json.RawMessage(`{"file_path":"x","old_string":"a","new_string":"b"}`))
 	b := drain(second)
 	var n int

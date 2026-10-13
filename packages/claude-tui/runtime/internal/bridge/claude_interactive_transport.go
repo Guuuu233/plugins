@@ -1408,18 +1408,30 @@ func (r *subscriptionRun) readInteractiveOneTurn(rd io.Reader) {
 				return
 			}
 			r.mu.Lock()
+			activeCallback := r.pending[id] != nil
 			continued := r.resuming && r.segment != nil
 			ready := !r.closed && r.segment != nil && r.tools[name] &&
 				name != interactiveImageTool && name != r.searchName
 			r.mu.Unlock()
+			if !activeCallback {
+				return // the native MCP caller cancelled before handoff
+			}
 			// The previous native tool turn stays marked stopped until its
 			// next transcript assistant row. If Claude enters MCP before
 			// writing that row, the newly attached continuation is proof
 			// this callback belongs to the next tool turn, not a duplicate.
 			if toolStopped && !continued {
+				// The previous client tool segment already closed; the
+				// Desktop cannot execute an unshown late parallel tool.
+				log.Printf("Claude interactive MCP late callback refused: tool=%q", name)
+				r.rejectUnshownInteractiveMCP(id)
 				return
 			}
 			if !ready {
+				// Never leave native Claude Code waiting for a callback
+				// that has no live Desktop response stream.
+				log.Printf("Claude interactive MCP unavailable stream: tool=%q", name)
+				r.rejectUnshownInteractiveMCP(id)
 				return
 			}
 			if toolStopped {
@@ -1449,7 +1461,13 @@ func (r *subscriptionRun) readInteractiveOneTurn(rd io.Reader) {
 			})
 		})
 	}
+	queued := r.queuedCallbacks
+	r.queuedCallbacks = nil
+	onCall := r.onCall
 	r.mu.Unlock()
+	for _, c := range queued {
+		onCall(c.id, c.name, c.args)
+	}
 	defer func() {
 		pmu.Lock()
 		finished = true
