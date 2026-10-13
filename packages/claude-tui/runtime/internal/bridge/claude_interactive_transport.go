@@ -1554,8 +1554,21 @@ func (r *subscriptionRun) readInteractiveOneTurn(rd io.Reader) {
 			}
 			if toolStopped {
 				r.mu.Lock()
-				continued := r.resuming && r.segment != nil
+				segmentOpen := r.segment != nil
+				continued := r.resuming && segmentOpen
 				r.mu.Unlock()
+				if !segmentOpen {
+					// Native Claude can write another tool_use row for the
+					// *same* assistant message long after unstreamedQuiet
+					// closed the client response. No new KStart may run
+					// here: emit(KStart) would erase the still-outstanding
+					// shown tool IDs, causing a permanent HTTP 409 on its
+					// real tool_result. The sibling's actual MCP callback
+					// may arrive after this turn reattaches; until then
+					// it cannot be submitted to the disconnected client.
+					pmu.Unlock()
+					continue
+				}
 				if continued {
 					toolStopped = false
 				}
