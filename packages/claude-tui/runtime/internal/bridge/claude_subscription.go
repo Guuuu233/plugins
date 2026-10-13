@@ -1496,6 +1496,19 @@ type controlReply struct {
 // for the turn, one with a tool call in the client's hands, one whose
 // Claude Code refuses or doesn't answer — is ended, as before.
 func (r *subscriptionRun) letGo() {
+	// A disconnected client may still be executing a tool we already handed
+	// it. Keep the same MCP run for its result; restarting it would orphan
+	// that result and risk replaying a side-effecting tool.
+	r.mu.Lock()
+	waitingForClientTool := r.interactive && !r.closed && len(r.pending) > 0 && len(r.shown) > 0
+	r.mu.Unlock()
+	if waitingForClientTool {
+		r.endSegment()
+		r.park()
+		r.timer.Reset(30 * time.Minute)
+		log.Printf("Claude interactive client disconnected during MCP tool handoff; keeping run for tool results")
+		return
+	}
 	r.mu.Lock()
 	turn, back := r.turnUUID, r.backKey
 	can := !r.closed && r.stdin != nil && r.bridge != nil && r.timer != nil &&
