@@ -256,6 +256,12 @@ type subscriptionRun struct {
 	// budget notice. Those counters change while an MCP tool is running,
 	// without any edit to the user's conversation or tool ownership.
 	toldWithoutBudgetNotices string
+	// Narrow PTY exception: an already-completed historical tool_result
+	// may have its output truncated by Desktop. The fingerprint preserves
+	// every other field, especially user/system text, invocation arguments,
+	// tool result identity and status. It is NOT used for new-run lookup.
+	priorResultShapeDigest [32]byte
+	priorResultShapeCount  int
 	// Diagnostic fingerprints only: never retain a second copy of request text.
 	heardHistory []historyMessageFingerprint
 
@@ -1707,18 +1713,65 @@ func historyKey(msgs []Message) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// toolResultShapePrefix hashes the exact wire structure of a conversation
+// except the TEXT OUTPUT inside previously completed tool_result parts.
+// It never erases a user text block, tool call args, tool ID, tool error
+// flag, image, file, assistant text or any system instructions. The result
+// count is fixed by the baseline, so an inserted/removed historical turn
+// cannot pass. Dynamic system-only token budget rows are already a separate
+// exact-shape allowlist: they can be omitted here, too.
+func toolResultShapePrefix(msgs []Message, limit int) ([32]byte, int) {
+	var blank [32]byte
+	filtered := withoutDynamicTokenBudgetNotices(msgs)
+	if limit > len(filtered) {
+		return blank, 0
+	}
+	h := sha256.New()
+	hasPriorResult := false
+	for i, m := range filtered[:limit] {
+		copyOfMessage := m
+		copyOfMessage.Parts = slices.Clone(m.Parts)
+		for j := range copyOfMessage.Parts {
+			p := &copyOfMessage.Parts[j]
+			if m.Role == "user" && p.Kind == ToolResult {
+				hasPriorResult = true
+				p.Text = "" // do NOT modify any other result field
+			}
+		}
+		wire, err := json.Marshal(copyOfMessage)
+		if err != nil {
+			return blank, 0
+		}
+		fmt.Fprintf(h, "%d:", i)
+		h.Write(wire)
+		h.Write([]byte{0})
+	}
+	if !hasPriorResult {
+		return blank, 0 // never accept a rewrite without prior tool output
+	}
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out, limit
+}
+
 // heard keeps the conversation of the request the run now answers.
 func (r *subscriptionRun) heard(msgs []Message) {
 	key := historyKey(msgs)
 	stable := ""
+	var resultShape [32]byte
+	var resultShapeCount int
 	var diagnostic []historyMessageFingerprint
 	if r.interactive {
-		stable = historyKey(withoutDynamicTokenBudgetNotices(msgs))
+		filtered := withoutDynamicTokenBudgetNotices(msgs)
+		stable = historyKey(filtered)
+		resultShape, resultShapeCount = toolResultShapePrefix(filtered, len(filtered))
 		diagnostic = interactiveHistoryFingerprints(msgs)
 	}
 	r.mu.Lock()
 	r.told = key
 	r.toldWithoutBudgetNotices = stable
+	r.priorResultShapeDigest = resultShape
+	r.priorResultShapeCount = resultShapeCount
 	r.heardHistory = diagnostic
 	r.mu.Unlock()
 }
@@ -1731,6 +1784,7 @@ func (r *subscriptionRun) follows(msgs []Message) bool {
 	r.mu.Lock()
 	told := r.told
 	stable := r.toldWithoutBudgetNotices
+	priorDigest, priorCount := r.priorResultShapeDigest, r.priorResultShapeCount
 	r.mu.Unlock()
 	if told == "" {
 		return true // a run made in a test may have heard none
@@ -1750,7 +1804,21 @@ func (r *subscriptionRun) follows(msgs []Message) bool {
 	hashMessages(h, withoutDynamicTokenBudgetNotices(msgs), func(int) {
 		found = found || hex.EncodeToString(h.Sum(nil)) == stable
 	})
-	return found
+	if found {
+		return true
+	}
+	// Only a run already selected by a live tool ID can reach this check.
+	// Desktop may later truncate older tool_result bodies, but it may not
+	// alter ANY previous user instruction or tool invocation. Compare the
+	// frozen baseline prefix; the current in-flight tool result is outside
+	// this prefix and is validated separately by exact ID/ownership.
+	if priorCount > 0 {
+		if got, n := toolResultShapePrefix(msgs, priorCount); n == priorCount && got == priorDigest {
+			log.Print("Claude interactive accepted historical tool-result output rewrite (all user text, tool identity and args unchanged)")
+			return true
+		}
+	}
+	return false
 }
 
 // Desktop persists its generated budget row inside system-reminder, with

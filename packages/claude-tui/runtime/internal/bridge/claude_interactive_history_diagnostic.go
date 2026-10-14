@@ -11,7 +11,31 @@ import (
 // results, IDs or even their hashes. They never participate in acceptance.
 type historyMessageFingerprint struct {
 	role  string
+	shape string // kinds only, never prompt text, tool IDs, names or hashes
 	words [32]byte
+}
+
+func historyPartShape(m Message) string {
+	var kinds []string
+	for _, p := range m.Parts {
+		switch p.Kind {
+		case Text:
+			kinds = append(kinds, "text")
+		case ToolCall:
+			kinds = append(kinds, "call")
+		case ToolResult:
+			kinds = append(kinds, "result")
+		case Thinking:
+			kinds = append(kinds, "thinking")
+		case Image:
+			kinds = append(kinds, "image")
+		case File:
+			kinds = append(kinds, "file")
+		default:
+			kinds = append(kinds, "other")
+		}
+	}
+	return strings.Join(kinds, ",")
 }
 
 // Bound the suffix summary and emit only structural counts. This explains why
@@ -59,7 +83,7 @@ func interactiveHistoryFingerprints(msgs []Message) []historyMessageFingerprint 
 		default:
 			role = "other"
 		}
-		out = append(out, historyMessageFingerprint{role: role, words: sha256.Sum256([]byte(word))})
+		out = append(out, historyMessageFingerprint{role: role, shape: historyPartShape(msgs[i]), words: sha256.Sum256([]byte(word))})
 	}
 	return out
 }
@@ -76,11 +100,12 @@ func (r *subscriptionRun) historyMismatchDiagnostic(msgs []Message) string {
 		if i < len(current) && before == current[i] {
 			continue
 		}
-		afterRole := "missing"
+		afterRole, afterShape := "missing", "missing"
 		if i < len(current) {
 			afterRole = current[i].role
+			afterShape = current[i].shape
 		}
-		return fmt.Sprintf("normalized_message=%d old_role=%s new_role=%s old_messages=%d current_messages=%d", i, before.role, afterRole, len(old), len(current))
+		return fmt.Sprintf("normalized_message=%d old_role=%s new_role=%s old_parts=%s new_parts=%s old_messages=%d current_messages=%d", i, before.role, afterRole, before.shape, afterShape, len(old), len(current))
 	}
 	return "normalized_history_unchanged"
 }
