@@ -29,6 +29,24 @@ import (
 
 const interactiveBridgeEnv = "MAGPIE_CLAUDE_INTERACTIVE_BRIDGE"
 
+// Claude Code can abort an otherwise healthy MCP call after five minutes
+// without progress, severing the pending tool_result and turning Desktop's
+// later continuation into a 409. The Magpie MCP server only receives a
+// response when the client completes its tool, so allow long local builds.
+// The setting is scoped to this ephemeral MCP server, not to user servers.
+const interactiveMCPToolTimeoutMS = 30 * 60 * 1000
+
+func interactiveMCPConfig(helperExe string, helperArgv []string, callback, toolsPath string) string {
+	config, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{
+		"magpie": map[string]any{
+			"command": helperExe,
+			"args":    append(slices.Clone(helperArgv), callback, toolsPath),
+			"timeout": interactiveMCPToolTimeoutMS,
+		},
+	}})
+	return string(config)
+}
+
 // Claude Code's interactive TUI silently keeps only the tail of very large
 // pasted prompts. The boundary is byte-oriented, so a rune cap is unsafe for
 // Chinese and other multibyte histories.
@@ -1274,10 +1292,8 @@ func (b *subscriptionBridge) startInteractiveWithPromptImages(ctx context.Contex
 	}
 	token := randomToken()
 	callback := callbackBaseURL() + "/_magpie/claude-mcp/" + token
-	mcpConfig, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{
-		"magpie": map[string]any{"command": helperExe, "args": append(helperArgv, callback, toolsPath)},
-	}})
-	args := interactiveWrapperArgs(model, string(mcpConfig), req.Effort, resumeID)
+	mcpConfig := interactiveMCPConfig(helperExe, helperArgv, callback, toolsPath)
+	args := interactiveWrapperArgs(model, mcpConfig, req.Effort, resumeID)
 	if req.ThinkOff {
 		// Use one argv so older bridge parsers that do not know --thinking's
 		// arity cannot mistake "disabled" for the user's prompt.

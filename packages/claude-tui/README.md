@@ -60,3 +60,7 @@ native Windows PTY execution are not supported.
 - Windows: WSL2 Linux only; native Windows is refused.
 
 See [COMPATIBILITY.md](COMPATIBILITY.md) for the detailed evidence and limits.
+
+## Archived community PR status and binary provenance
+
+This branch was used for the **declined and closed** community PR #107; it is not an official distribution. The source here now includes the 30-minute MCP tool timeout fix, but the checked-in prebuilt Runtime files are **older** and are not part of this fix. For the complete updated source-and-binary release, see the separate independent [`v0.1.1`](https://github.com/Guuuu233/magpie-claude-tui-plugin/releases/tag/v0.1.1). Do not install the archived branch expecting its bundled Runtime binaries to include the fix.
